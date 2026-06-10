@@ -628,6 +628,49 @@ user.prov.session is missing on <path>; fstype=<fs>; dmesg tail = <…>."
 
 **Escalation**: if any auto-fix condition fails, OR if the scope-check detects a write outside `~/.cache/ctrace/sessions/`, write to Pending: `ctrace scribe backfill: <which condition failed or scope-escape paths>; N_missing=N; run \`scribe backfill ~/.cache/ctrace/sessions\` manually to repair.`
 
+### Playbook: `ctrace_sessionend_resolve`
+
+**Trigger**: always runs after `ctrace_scribe_backfill` completes (whether it ran the backfill or found `N_missing == 0`). This is the verify-and-close step for the `ctrace-sessionend-flake` docket finding.
+
+**Purpose**: distinguish "hook is doing its job" from "review's own backfill is doing the job". The key signal is `BACKFILL_RENDERED` — the count of logs the review's own backfill rendered this run (captured in the `ctrace_scribe_backfill` apply-log entry). If the hook wiring is live and working, `BACKFILL_RENDERED` trends to 0 (the SessionStart sweep already closed everything before the review ran). The playbook resolves the finding only when both the wiring is confirmed live **and** the review's backfill rendered nothing this run.
+
+**Investigation (read-only)**:
+1. **Check wiring**: grep `~/.claude/scripts/ctrace-session-start.sh` for an `orphan-reap` invocation and for a `scribe backfill` invocation:
+   ```sh
+   HOOK=~/.claude/scripts/ctrace-session-start.sh
+   HAS_REAP=no
+   HAS_BACKFILL=no
+   if grep -q 'orphan-reap' "$HOOK" 2>/dev/null; then HAS_REAP=yes; fi
+   if grep -q 'scribe backfill' "$HOOK" 2>/dev/null; then HAS_BACKFILL=yes; fi
+   ```
+2. **Read this run's backfill count**: from the most recent `"action":"ctrace_scribe_backfill"` apply-log entry, extract `"rendered"`. If the entry is absent or malformed, treat as `BACKFILL_RENDERED=unknown`.
+   ```sh
+   APPLY_LOG=~/brain/state/apply-log.jsonl
+   BACKFILL_RENDERED=$(jq -s '[.[] | select(.action=="ctrace_scribe_backfill" and .rendered != null)] | last | .rendered // "unknown"' "$APPLY_LOG" 2>/dev/null || echo "unknown")
+   ```
+3. Log `"action":"investigate.ctrace_sessionend_resolve", "step":"observe"` to `apply-log.jsonl` with `has_reap`, `has_backfill`, `backfill_rendered`.
+
+**Decision logic**:
+
+- **Wiring absent** (`HAS_REAP=no` or `HAS_BACKFILL=no`): do NOT resolve. Record evidence `"wiring absent: reap=$HAS_REAP backfill=$HAS_BACKFILL"`. Log `"step":"skipped_wiring_absent"`. Leave the finding open for the next run.
+- **Wiring present but backfill rendered >0** (`BACKFILL_RENDERED` is a number > 0): wiring is live but the hook didn't fully close the gap this run. Do NOT resolve. Log `"step":"skipped_hook_not_dominant"` with `"backfill_rendered": N`. Leave the finding open.
+- **`BACKFILL_RENDERED=unknown`** (apply-log missing/malformed): cannot confirm the hook did the work. Do NOT resolve. Log `"step":"skipped_backfill_count_unknown"`. Leave the finding open.
+- **Both conditions met** (`HAS_REAP=yes`, `HAS_BACKFILL=yes`, `BACKFILL_RENDERED == 0`): proceed to resolve.
+
+**Resolve step** (only when both conditions met):
+1. Build evidence string: `"wiring confirmed (orphan-reap+scribe backfill in ctrace-session-start.sh); review backfill rendered 0 this run — hook closed all gaps before review ran"`.
+2. Run:
+   ```sh
+   docket resolve ctrace-sessionend-flake \
+     --reason "wiring confirmed (orphan-reap+scribe backfill in ctrace-session-start.sh); review backfill rendered 0 this run"
+   ```
+3. Log `"step":"resolved"` with the evidence to `apply-log.jsonl`.
+4. Note in the journal's ctrace section: `ctrace-sessionend-flake resolved: hook wiring confirmed + review backfill rendered 0`.
+
+**Regression handling**: this playbook never re-resolves a finding that has already been resolved and stays resolved. If on a later run the review's backfill renders >0 again (regression), the existing `ctrace_scribe_backfill` playbook re-reports the finding via `docket report --key ctrace-sessionend-flake` and the streak restarts naturally. No additional code is needed here — the two playbooks self-heal in both directions.
+
+**Constraint: read-mostly**. The only mutation this playbook performs is the conditional `docket resolve`. It never edits hook scripts, never renders summaries, and never runs `scribe` itself.
+
 ### Playbook: `build_stale_blockers`
 
 **Trigger**: `~/.claude/skills/build/state/manifest.json` has at least one PRD entry whose `blockers[]` is non-empty (caught in Phase A).
@@ -818,7 +861,8 @@ Order:
 12. Invoke `Skill(fewer-permission-prompts)` if the special case was hit.
 13. Clear stale /build blockers if Phase B.5 `build_stale_blockers` promoted to auto-fix: run `~/.claude/skills/build/scripts/clear-stale-blockers.sh`, capture stdout, append one apply-log entry with `"action":"clear_build_blockers"` and the JSON summary inlined. Exit code 2 (no blockers) is `"result":"noop"`, exit 0 is `"result":"ok"` (record `cleared_count` and `surfaced_count`), exit 1 is `"result":"error"`.
 14. Execute the ctrace backfill if Phase B.5 `ctrace_scribe_backfill` promoted it to auto-fix (all conditions met, `scribe` installed, `N_missing > 0`). Run the wchg-scoped `scribe backfill ~/.cache/ctrace/sessions`, verify scope, run the residual check, then run `scribe rollup --since today --format md` and capture output for Phase E. Append apply-log entry with `"action":"ctrace_scribe_backfill"` and rendered/skipped/residual counts. On failure, log `"result":"error"` and continue.
-15. `wchg reset ~/.claude` and `wchg reset /home/jsy/brain` so tomorrow's delta is clean. If a path was newly `wchg watch`-ed in Phase A (first run on this laptop), the reset is a no-op — skip it. Subsequent runs always reset.
+15. Run Phase B.5 `ctrace_sessionend_resolve` (always, immediately after step 14). Check hook wiring and backfill-rendered count; conditionally run `docket resolve ctrace-sessionend-flake` per the playbook logic. Append apply-log entry with `"action":"ctrace_sessionend_resolve"` and the step outcome (`resolved` / `skipped_wiring_absent` / `skipped_hook_not_dominant` / `skipped_backfill_count_unknown`). On failure, log `"result":"error"` and continue.
+16. `wchg reset ~/.claude` and `wchg reset /home/jsy/brain` so tomorrow's delta is clean. If a path was newly `wchg watch`-ed in Phase A (first run on this laptop), the reset is a no-op — skip it. Subsequent runs always reset.
 
 If any step fails, log `"result":"error"` with `"error":"<message>"` and continue. Do not abort the run.
 
