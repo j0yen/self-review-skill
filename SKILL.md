@@ -67,7 +67,7 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
 - `df -h /` — root disk usage
 - `free -h` — memory state
 - `uptime` — load
-- `pgrep -af claude` — list Claude PIDs (note duplicates, do not kill)
+- `muster verdict --format selfreview` — definitive session census with verdicts; falls back to `pgrep -af claude` if `muster` is not on PATH. Surface orphan/stale sessions in Pending but do not auto-kill — reap stays manual/confirmed (`muster reap` requires explicit user confirmation).
 - For each Claude PID, `~/.local/bin/procstat snap <pid>` — JSON with RSS, PSS, USS, IO bytes, cgroup limits, uptime. Use this to spot a runaway session (e.g., a Claude process with `vm_rss_bytes` an order of magnitude above its siblings, or `io_write_bytes` growing while `uptime_s` is short).
 
 **Network reachability:**
