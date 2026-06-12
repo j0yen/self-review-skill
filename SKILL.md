@@ -799,6 +799,36 @@ Do not emit `rollout apply` anywhere — plan-mode only.
 
 **Escalation**: if `binstale scan` exits with a code other than 0 or 1 (unexpected error), append to Pending: `binstale scan exited <code> — stderr: <first line of stderr>`. Do not treat this as stale.
 
+### Playbook: `reviewer_promotion_check`
+
+**Trigger**: runs weekly on Sunday (day-of-week check: `date +%u` equals 7). Skip on all other days — emit a single Snapshot line `reviewer_promotion_check: not Sunday, skipped` and stop.
+
+**Guard**: if `~/.claude/skills/autobuilder/state/reviewer-calibration.jsonl` does not exist or is empty, emit `reviewer_promotion_check: calibration log absent or empty, skipped`. No Pending item.
+
+**Investigation (read-only)**:
+1. Read the last 30 lines of `~/.claude/skills/autobuilder/state/reviewer-calibration.jsonl` (each line is a JSON object). Count `n` = number of records in this window.
+2. Among those `n` records, count `reverted` = number where `post_ship_revert` is not `null`.
+3. Compute `concern_to_revert_rate = reverted / n` (0.0 if `n == 0`).
+4. Read current phase from `/home/jsy/wintermute/autobuilder-cloud/skill/SKILL.md`: grep for `# REVIEWER-PHASE: [BC]`. Absent = Phase A.
+
+**Promotion logic and auto-fix**:
+
+- **If `n < 30`**: emit Snapshot line `reviewer_promotion_check: n=<n>, threshold=30, no_promotion`. Stop — do not modify any file.
+- **If `n >= 30` and `concern_to_revert_rate < 0.50` and current phase is A**: promote to Phase B.
+  1. In `/home/jsy/wintermute/autobuilder-cloud/skill/SKILL.md`, locate the line `**Reviewer-agent verdict handling and calibration log.**` and insert `# REVIEWER-PHASE: B` immediately before it.
+  2. Commit with message `reviewer-promotion: Phase A → B (n=<n>, rate=<rate>)` in the autobuilder skill repo.
+  3. Run `~/.claude/skills/build/scripts/self-push.sh` to push.
+  4. Append apply-log entry: `{"action":"reviewer_promotion_check","from":"A","to":"B","n":<n>,"rate":<rate>,"result":"ok"}`.
+- **If `n >= 30` and `concern_to_revert_rate >= 0.50` and current phase is not C**: promote to Phase C.
+  1. In the autobuilder SKILL.md, replace `# REVIEWER-PHASE: B` (if present) with `# REVIEWER-PHASE: C`; if absent (jumping from A), insert `# REVIEWER-PHASE: C` before `**Reviewer-agent verdict handling...`.
+  2. Commit with message `reviewer-promotion: → Phase C (n=<n>, rate=<rate>)` and push via `self-push.sh`.
+  3. Append apply-log entry with `"to":"C"`.
+- **If already at the target phase**: emit Snapshot line `reviewer_promotion_check: already at Phase <X>, no change`.
+
+**Auto-fix conditions**: promotion is **fully automatic** — no user approval needed. The rate threshold (0.50) and sample size (30) are objective; the fix is a single-line marker insertion in a skill file, easily reviewable and reversible. No daemon restarts, no package changes.
+
+**Escalation**: if the git commit or push fails, log `"result":"error"` in apply-log and append to Pending: `reviewer_promotion_check: commit/push failed — check autobuilder-cloud skill repo state`.
+
 ### Adding new playbooks
 
 A new playbook is justified when a finding appears in `docket list --escalated`
