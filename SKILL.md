@@ -679,17 +679,17 @@ user.prov.session is missing on <path>; fstype=<fs>; dmesg tail = <…>."
 1. For each non-empty `blockers` list, classify each blocker string:
    - **version-collision**: matches `^v\d+\.\d+\.\d+ collision with [\w-]+`. The blocker names a peer slug and a target version both PRDs claim.
    - **other**: AC-dependency, missing primitive, anything else.
-2. For each version-collision blocker, read both `PRD-<this-slug>.md` and `PRD-<other-slug>.md` under `~/wintermute/autobuilder/`. Count phasing-header occurrences of the colliding version (regex `\*\*\s*\d+[a-z]?\s*\(\s*v<version>\s*\)`). If the sum across both PRDs is ≤ 1, the collision has been resolved in source (one PRD was rebased) and the blocker is stale.
+2. For each version-collision blocker, read both `PRD-<this-slug>.md` and `PRD-<other-slug>.md` under `~/wintermute/PRDs/`. Count phasing-header occurrences of the colliding version (regex `\*\*\s*\d+[a-z]?\s*\(\s*v<version>\s*\)`). If the sum across both PRDs is ≤ 1, the collision has been resolved in source (one PRD was rebased) and the blocker is stale.
 
 **Auto-fix conditions (ALL must hold)**:
 - The blocker matches the version-collision pattern.
-- Both named PRDs exist on disk at `~/wintermute/autobuilder/PRD-<slug>.md`.
+- Both named PRDs exist on disk at `~/wintermute/PRDs/PRD-<slug>.md`.
 - Phasing-header count for the colliding version totals ≤ 1 across both PRDs.
 - `~/.claude/skills/build/state/tick.lock` is acquirable within 60 s (no /build tick in flight).
 
 **Fix**: `~/.claude/skills/build/scripts/clear-stale-blockers.sh`. The script acquires the tick lock (60s wait), re-verifies all four conditions above, removes only the qualifying blocker entries, appends a `blockers_audit_log` record on each touched manifest entry, atomic-renames the manifest, and prints a JSON summary. Exit 0 = ran (possibly cleared nothing); exit 2 = no blockers to inspect; exit 1 = error. Capture the JSON stdout into apply-log.
 
-**Escalation**: write to Pending one line per surfaced (non-cleared) blocker: `<slug>: <blocker> — verdict=<surfaced-non-version-collision|surfaced-still-colliding|surfaced-prd-missing>`. The non-version-collision case is the steady-state — AC-dependency blockers are legitimate and only humans should clear them. The still-colliding case means both PRDs still claim the same version and one needs a rebase. The PRD-missing case means a referenced PRD has vanished or moved; resolve by inspecting `git log -- PRD-*.md` in `~/wintermute/autobuilder/`.
+**Escalation**: write to Pending one line per surfaced (non-cleared) blocker: `<slug>: <blocker> — verdict=<surfaced-non-version-collision|surfaced-still-colliding|surfaced-prd-missing>`. The non-version-collision case is the steady-state — AC-dependency blockers are legitimate and only humans should clear them. The still-colliding case means both PRDs still claim the same version and one needs a rebase. The PRD-missing case means a referenced PRD has vanished or moved; resolve by inspecting `git log -- PRD-*.md` in `~/wintermute/PRDs/`.
 
 ### Playbook: `warden_enforcer_inert`
 
