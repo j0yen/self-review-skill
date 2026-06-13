@@ -685,7 +685,7 @@ user.prov.session is missing on <path>; fstype=<fs>; dmesg tail = <…>."
    HAS_REAP=no
    HAS_BACKFILL=no
    if grep -q 'orphan-reap' "$HOOK" 2>/dev/null; then HAS_REAP=yes; fi
-   if grep -q 'scribe backfill' "$HOOK" 2>/dev/null; then HAS_BACKFILL=yes; fi
+   if grep -qE 'scribe[[:space:]]backfill|"\$scribe"[[:space:]]backfill' "$HOOK" 2>/dev/null; then HAS_BACKFILL=yes; fi
    ```
 2. **Read this run's backfill count**: from the most recent `"action":"ctrace_scribe_backfill"` apply-log entry, extract `"rendered"`. If the entry is absent or malformed, treat as `BACKFILL_RENDERED=unknown`.
    ```sh
