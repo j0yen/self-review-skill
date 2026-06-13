@@ -799,6 +799,66 @@ Do not emit `rollout apply` anywhere — plan-mode only.
 
 **Escalation**: if `binstale scan` exits with a code other than 0 or 1 (unexpected error), append to Pending: `binstale scan exited <code> — stderr: <first line of stderr>`. Do not treat this as stale.
 
+### Playbook: `adopt_scan_probe`
+
+**Trigger**: runs unconditionally each B.5 pass — routine deterministic probe, not signal-gated. Purpose: replace the hand-written "fleet-binary-staleness / binstale never installed" and "adopt/rollout never installed" prose that has recurred in Pending since 2026-06-08 with a mechanized scan.
+
+**Guard**: if `adopt` is not on PATH (`command -v adopt` returns non-zero), emit a single Snapshot line and one Pending entry, then stop:
+
+```sh
+if ! command -v adopt >/dev/null 2>&1; then
+  echo "adopt: not installed — adoption gap probe skipped"
+  # Pending entry (printed into journal Pending section):
+  echo "- adopt: binary not on PATH — run \`cargo install --path ~/wintermute/adopt --root ~/.local\` to install the adoption scanner (PRD-adopt-scan)"
+fi
+```
+
+The probe must never abort the review — PATH-absent is the expected bootstrap state while PRD-adopt-scan is still shipping.
+
+**Investigation (read-only)**:
+1. `adopt scan --format json` — exit 0 means all tracked artifacts are `installed-current`; exit 1 means at least one is `not-installed` or `installed-stale`. Capture full JSON output.
+2. Parse each entry: extract `artifact`, `verdict`, `installed_path`, `fix_cmd` (fields per PRD-adopt-scan's JSON shape; tolerate absent fields with jq `// "unknown"`).
+
+```sh
+ADOPT_JSON=$(adopt scan --format json 2>/dev/null)
+ADOPT_EXIT=$?
+```
+
+**Auto-fix conditions**: NONE. This probe is **report-only** — it surfaces unadopted artifacts and pre-fills the install command, but never runs `adopt apply` or any install command autonomously. Mutation is explicitly delegated to `adopt apply`, which is gated on jsy's autonomy confirmation. This is the same escalate-don't-install discipline as `fleet-binary-staleness` / `rollout apply`.
+
+**On exit 0 (all artifacts current)**: append one Snapshot line:
+```
+adopt: all artifacts current (adopt scan)
+```
+No Pending item. Log `"action":"investigate.adopt_scan_probe", "step":"observe", "verdict":"all_current"` to `apply-log.jsonl`.
+
+**On exit 1 (unadopted artifacts)**: run `adopt report --run "$DOCKET_RUNID"` if `docket` is on PATH, so each unadopted artifact lands as an `adopt:<bin>` docket entry (streak + escalation handled by docket):
+
+```sh
+if command -v docket >/dev/null 2>&1; then
+  adopt report --run "$DOCKET_RUNID" 2>/dev/null || true
+fi
+```
+
+Then for each artifact where `verdict` is `not-installed` or `installed-stale`, write a structured Pending entry with the pre-filled fix command from the scan:
+
+```
+- adopt:<artifact> (verdict=<verdict>)
+  <artifact> is not adopted to ~/.local — run: <fix_cmd from adopt scan JSON>
+  (report-only; adopt apply --artifact <artifact> to install under jsy's autonomy gate)
+```
+
+The pre-filled `fix_cmd` replaces the hand-written "rollout plan needed / binstale never installed" prose that has recurred since 2026-06-08. Open `adopt:*` docket entries (from `docket list --open`) supersede hand-grepping journal prose for this class of finding.
+
+Log `"action":"investigate.adopt_scan_probe", "step":"observe", "n_unadopted": N, "artifacts": [<names>]` to `apply-log.jsonl`.
+
+**On unexpected exit code** (not 0 or 1): append to Pending:
+```
+- adopt: scan exited <code> — stderr: <first line>; investigate `adopt scan --format json` manually
+```
+
+**Escalation**: none beyond the Pending entries above. The probe is additive — it does not remove or weaken the existing `fleet-binary-staleness` probe or any other B.5 probe.
+
 ### Playbook: `reviewer_promotion_check`
 
 **Cadence**: weekly — only run when today is Sunday (`date +%u` returns `7`). On any other weekday this playbook is inert; skip it without logging. (It reads a slow-moving calibration log; daily evaluation would just re-emit the same verdict.)
