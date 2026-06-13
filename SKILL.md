@@ -183,7 +183,7 @@ wintermute kernel, but never auto-reboot.
 
   ```sh
   # Probe 1: group present?
-  MEMLOG_GROUP=$(getent group memlog 2>/dev/null && echo yes || echo no)
+  getent group memlog >/dev/null 2>&1 && MEMLOG_GROUP=yes || MEMLOG_GROUP=no
   # Probe 2: device group = memlog?
   MEMLOG_DEV_GROUP=$(stat -c '%G' /dev/memlog 2>/dev/null || echo unknown)
   # Probe 3: current user a member?
@@ -316,6 +316,50 @@ For each finding that landed in "Recommend, don't apply," check whether a playbo
 If no playbook matches, leave the Pending item unchanged. Don't invent fixes for signals without a playbook — adding a playbook is its own deliberate change to this file (see "Adding new playbooks" at the end of this phase).
 
 For every investigation step, append a JSON line to `/home/jsy/brain/state/apply-log.jsonl` with `"action":"investigate.<playbook-id>"` and a `"step"` field (one of `observe`, `diagnose`, `fix_attempted`, `fix_verified`, `fix_failed`, `escalated`). The journal entry must be reconstructable from these log lines alone.
+
+### Sub-step: `plumb_gate` — quarantine findings whose probe disagrees with ground truth
+
+**When it runs**: before any playbook whose finding is registered in plumb promotes that finding to Auto-apply or Pending. Currently registered probe→playbook mappings:
+
+| probe-id | playbook |
+|---|---|
+| `memlog-active` | `memlog_group_awaiting_activation` |
+| `ctrace-backfill-wired` | `ctrace_sessionend_resolve` |
+| `adopt-report-exists` | `adopt-report` |
+
+**Gate logic** (run once per registered probe, before the playbook body executes):
+
+1. Check whether `plumb` is on PATH: `command -v plumb >/dev/null 2>&1`.
+   - **Absent**: skip the gate entirely (fail-open — the gate must never block a self-review pass). Write a single `plumb absent` note to the journal (once per run, not once per probe). Log `{"action":"plumb_gate","probe":"<id>","step":"skipped_absent"}` to `apply-log.jsonl`. The playbook proceeds as if the gate passed.
+
+2. If `plumb` is present, run both checks and capture their JSON output:
+   ```sh
+   PLUMB_CHECK=$(plumb check <probe-id> --format json 2>/dev/null)
+   PLUMB_TRUST=$(plumb trust <probe-id> --format json 2>/dev/null)
+   PLUMB_RESULT=$(echo "$PLUMB_CHECK" | jq -r '.result // "unknown"')
+   PLUMB_VERDICT=$(echo "$PLUMB_TRUST" | jq -r '.verdict // "unknown"')
+   PLUMB_ORACLE=$(echo "$PLUMB_CHECK" | jq -r '.oracle // "unknown"')
+   ```
+
+3. **Quarantine** when `PLUMB_RESULT == "disagree"` OR `PLUMB_VERDICT == "uncalibrated"`:
+   - Do **not** park the finding to the docket and do not auto-apply.
+   - Log to `apply-log.jsonl`:
+     ```json
+     {"action":"plumb_gate","probe":"<id>","step":"probe_uncalibrated","result":"<PLUMB_RESULT>","verdict":"<PLUMB_VERDICT>","oracle":"<PLUMB_ORACLE>"}
+     ```
+   - Write one Pending line:
+     ```
+     - probe <id> disagrees with ground-truth oracle (result=<PLUMB_RESULT> verdict=<PLUMB_VERDICT> oracle=<PLUMB_ORACLE>) — finding withheld; fix the probe before it can promote a finding.
+     ```
+   - **Stop** — do not execute the playbook body for this probe's finding.
+
+4. **Pass through** when `PLUMB_RESULT == "agree"` AND `PLUMB_VERDICT` is `"trusted"` or `"unknown"`:
+   - Log `{"action":"plumb_gate","probe":"<id>","step":"passed","result":"agree","verdict":"<PLUMB_VERDICT>"}` to `apply-log.jsonl`.
+   - The playbook proceeds exactly as today. No behavior change.
+
+5. Any other combination (e.g. `plumb` exited nonzero, JSON malformed, result is neither `agree` nor `disagree`): treat as **pass-through** (fail-open). Log `{"action":"plumb_gate","probe":"<id>","step":"skipped_error","raw_result":"<PLUMB_RESULT>","raw_verdict":"<PLUMB_VERDICT>"}` and note the parse failure in the journal. Do not block the playbook.
+
+**Extending the gate**: to register a new probe, add a row to the table above. The gate reads the table from this document — no code change is required.
 
 ### Playbook: `ctrace_tracer_down`
 
