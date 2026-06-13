@@ -361,6 +361,28 @@ For every investigation step, append a JSON line to `/home/jsy/brain/state/apply
 
 **Extending the gate**: to register a new probe, add a row to the table above. The gate reads the table from this document — no code change is required.
 
+### Sub-step: `litmus:` banner — surface probe-suspect findings before playbooks run
+
+**When it runs**: immediately after `plumb_gate`, before any playbook body executes. This is a read-only signal step that informs working memory and the Phase E journal; it does not change playbook routing.
+
+**Step**:
+
+```sh
+LITMUS_JSON=$(docket stuck --format json 2>/dev/null || echo '[]')
+LITMUS_COUNT=$(echo "$LITMUS_JSON" | jq 'length' 2>/dev/null || echo 0)
+if [ "$LITMUS_COUNT" -eq 0 ]; then
+  LITMUS_BANNER="litmus: clean"
+else
+  LITMUS_KEYS=$(echo "$LITMUS_JSON" | jq -r '[.[].key] | join(", ")' 2>/dev/null || echo "unknown")
+  LITMUS_BANNER="litmus: ${LITMUS_COUNT} probe-suspect finding(s): ${LITMUS_KEYS}"
+fi
+echo "$LITMUS_BANNER"
+```
+
+**If `docket` is absent on PATH**: emit `litmus: docket absent — skipped` and continue. Fail-open — this banner must never block a review pass.
+
+Capture `LITMUS_JSON`, `LITMUS_COUNT`, and `LITMUS_BANNER` into working memory for Phase E journaling. The banner reads uniformly alongside the `docket digest` and `plumb_gate` output that precede it in Phase B.5.
+
 ### Playbook: `ctrace_tracer_down`
 
 **Trigger**: `ctrace status` returns `running:false` AND `pgrep -af claude` lists ≥1 PID that is not the current self-review session.
@@ -930,6 +952,66 @@ Use `~/.local/bin/txn-edit snap ~/.claude/skills/autobuilder/SKILL.md` before th
 
 **Escalation**: if `n >= 30` but the autobuilder SKILL.md is not a git repo, or the `(current` marker is absent/ambiguous (zero or >1 matches), do NOT edit — write to Pending: `reviewer_promotion_check: n=N rate=R wants <phase>; blocked on <not-a-repo|ambiguous-marker>` so a human applies the phase edit deliberately. A miscalibrated auto-edit to the build system's own gate is worse than a one-week delay.
 
+### Playbook: `litmus_audit`
+
+**Trigger**: `LITMUS_COUNT > 0` (i.e. `docket stuck --format json` returned at least one probe-suspect finding in the `litmus:` banner step above). Runs after all other B.5 playbooks have had a chance to execute, so the audit targets only findings still open at that point.
+
+**Purpose**: distinguish "the finding is genuinely world-stuck" from "the probe is lying." The `docket stuck` signal names findings that have been reported many times without resolving — the canonical symptom of a probe whose verdict cannot be trusted. This playbook audits each suspect finding by running its probe's self-test fixture (if one exists) and routes the result to the apply-log. It never resolves or acknowledges a finding on its own — resolution stays with the per-finding playbooks (e.g. `ctrace_sessionend_resolve`). Visibility is the deliverable.
+
+**Guard**: if `docket` is absent or `LITMUS_COUNT == 0`, this playbook is inert. Skip without logging. If `docket stuck` exited nonzero for a reason other than "no findings," log `"action":"investigate.litmus_audit","step":"skipped_error"` and continue.
+
+**Investigation (read-only)**:
+
+For each key `K` in `LITMUS_JSON`:
+
+1. Check whether a fixture script exists for this probe:
+   ```sh
+   FIXTURE=~/.claude/skills/self-review/scripts/litmus-probe-selftest.sh
+   command -v "$FIXTURE" >/dev/null 2>&1 && FIXTURE_OK=yes || FIXTURE_OK=no
+   # The fixture script accepts the probe key as its first argument.
+   ```
+
+2. **When a fixture exists** (`FIXTURE_OK=yes`):
+   ```sh
+   FIXTURE_OUT=$(bash "$FIXTURE" "$K" 2>&1)
+   FIXTURE_EXIT=$?
+   ```
+   - **Exit 0 (PASS)** — the probe correctly classifies its own ground-truth fixture: the finding is genuinely world-stuck; the probe is not at fault.
+     - Do **not** re-park, do not resolve. Leave the finding open for the appropriate per-finding playbook to handle.
+     - Log to `apply-log.jsonl`:
+       ```json
+       {"action":"investigate.litmus_audit","step":"probe-verified","key":"<K>","result":"probe-verified","evidence":"fixture exit 0"}
+       ```
+     - Journal note in the ctrace / Notable section: `litmus: <K> — probe verified against fixture; finding is real; audit complete.`
+
+   - **Exit non-zero (FAIL)** — the probe misclassifies its own fixture: the probe is suspect.
+     - Do **not** re-park the finding (re-parking would let a lying probe park a real world-problem again). Do **not** call `docket resolve` or `docket ack`.
+     - Log to `apply-log.jsonl`:
+       ```json
+       {"action":"investigate.litmus_audit","step":"probe-suspect","key":"<K>","result":"probe-suspect","evidence":"<first line of FIXTURE_OUT>"}
+       ```
+     - Write one Pending entry:
+       ```
+       - litmus: probe for <K> failed its self-test fixture — probe output: <FIXTURE_OUT first line>
+         Finding is probe-suspect; do NOT re-park until probe is fixed.
+         Next step: inspect ~/.claude/skills/self-review/scripts/litmus-probe-selftest.sh for <K> and correct the probe logic.
+       ```
+
+3. **When no fixture exists** (`FIXTURE_OK=no` or the fixture script does not handle key `K`):
+   - Log to `apply-log.jsonl`:
+     ```json
+     {"action":"investigate.litmus_audit","step":"no-fixture","key":"<K>","result":"no-fixture"}
+     ```
+   - Add to Pending:
+     ```
+     - litmus: <K> has no self-test fixture — add a fixture entry to litmus-probe-selftest.sh (see PRD-litmus-probe-fixtures).
+     ```
+   - Capture the fixture-build item in working memory so Phase E can include it in the litmus summary.
+
+**Constraint: no auto-resolution, no ack.** `litmus_audit` never calls `docket resolve` or `docket ack`. Only the dedicated per-finding playbook (e.g. `ctrace_sessionend_resolve`) may resolve a finding; litmus only re-routes attention.
+
+**Worked example — ctrace false-negative**: had this playbook been active during the 10-run ctrace saga, `docket stuck` would have surfaced `ctrace-sessionend-flake` by run ~5–6 (after the streak crossed the stuck threshold). The fixture audit would then have run `litmus-probe-selftest.sh ctrace-sessionend-flake`, which would have executed the probe's grep against a known-wired hook file. The grep false-negative (the probe returned "wiring absent" when the wiring was present) would have caused a fixture FAIL, surfacing `probe-suspect` to Pending by run 6 rather than at run 10. The user would have inspected the probe's grep pattern three or four runs earlier, found the mismatch, and the ctrace finding would have been resolved rather than re-parked.
+
 ### Adding new playbooks
 
 A new playbook is justified when a finding appears in `docket list --escalated`
@@ -1041,6 +1123,10 @@ Write `/home/jsy/brain/journal/YYYY-MM-DD.md` with this structure:
 
 ## Notable
 - <anything surprising — large unexpected growth, repeated errors in sessions, etc.>
+
+## Litmus
+- <LITMUS_BANNER line from B.5 (e.g. `litmus: clean` or `litmus: 2 probe-suspect finding(s): ctrace-sessionend-flake, memlog-active`)>
+- <one bullet per finding audited this run: `<key>: probe-verified / probe-suspect / no-fixture — <evidence>`>
 ```
 
 Then **persist a reflective memory** so the next pass inherits this run's findings:
