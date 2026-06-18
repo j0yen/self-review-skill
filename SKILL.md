@@ -66,6 +66,14 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
 **System (use `procstat` for structured output):**
 - `df -h /` — root disk usage
 - `free -h` — memory state
+- **trim survey (guarded):** if `trim` is on PATH, run `trim survey --format json` and emit a one-liner summary (e.g. `trim: swap_used=<X> zram=<Y> anon=<Z>`). If `trim` is absent, emit the legacy one-liner from `free -h` output and exit 0. Block is additive — does not replace `free -h`. Example guard:
+  ```bash
+  if command -v trim &>/dev/null; then
+    trim survey --format json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print('trim: '+' '.join(f\"{k}={v}\" for k,v in d.items() if k in ('swap_used','zram_used','anon_reclaimable')))" 2>/dev/null || true
+  else
+    free -h | awk '/Swap:/{print "swap: total="$2" used="$3" free="$4}' || true
+  fi
+  ```
 - `uptime` — load
 - `muster verdict --format selfreview` — definitive session census with verdicts; falls back to `pgrep -af claude` if `muster` is not on PATH. Surface orphan/stale sessions in Pending but do not auto-kill — reap stays manual/confirmed (`muster reap` requires explicit user confirmation).
 - For each Claude PID, `~/.local/bin/procstat snap <pid>` — JSON with RSS, PSS, USS, IO bytes, cgroup limits, uptime. Use this to spot a runaway session (e.g., a Claude process with `vm_rss_bytes` an order of magnitude above its siblings, or `io_write_bytes` growing while `uptime_s` is short).
@@ -158,6 +166,12 @@ The wintermute ecosystem lives at `~/wintermute/` (bootstrap monorepo + per-proj
 - **Subscriber orphans**: list `agorabus subscribe` processes with `pgrep -af 'agorabus subscribe'`; for each, extract the `--session-id` arg and check `agorabus peers | jq -e '.[] | select(.session_id == "<sid>")'`. Subscribers without a matching peer record are orphans (their connection is alive but the daemon dropped the record, likely via the pre-fix collision bug or a guest-publish under an old daemon). Phase B.5 playbook can reap+reattach.
 - **Per-project repos present**: `awk -F'[][]' '/^\| \[/ && /github.com/{print $2}' ~/wintermute/REPOS.md | sort -u` enumerates the ecosystem; cross-reference with `ls -d ~/wintermute/*/.git 2>/dev/null | xargs -n1 dirname | xargs -n1 basename | sort -u` to find any indexed-but-not-cloned (`bootstrap/install.sh` will fix). Report only — don't auto-clone in self-review.
 - **Per-project dirty trees**: `for d in ~/wintermute/*/.git ~/projects/*/.git; do d=${d%/.git}; [ -d "$d/.git" ] || continue; s=$(git -C "$d" status --short 2>/dev/null | wc -l); [ "$s" -gt 0 ] && echo "$d: $s lines dirty"; done`. Carry forward into Pending; do not auto-stash (the user may be mid-edit). Long-standing dirty trees (peon-ping is known) should match a prior recall memory.
+- **Provenance digest (guarded):** if `colophon` is on PATH, run `colophon digest --format markdown` and paste its output as an additive block in the journal's cruft/disk section — it attributes build-worktrees and stale config to the skill that wrote them. If `colophon` is absent, skip this block silently; existing disk/cruft reporting is unaffected. Example guard:
+  ```bash
+  if command -v colophon &>/dev/null; then
+    colophon digest --format markdown 2>/dev/null || true
+  fi
+  ```
 - **Per-project unpushed commits**: same loop, but `git -C "$d" rev-list --count @{u}..HEAD 2>/dev/null` per branch with an upstream. Anything >0 lands in Pending (don't auto-push — every push is visible-to-others).
 - **Bootstrap symlinks intact**: `for l in ~/.local/bin/{sbx,pevent,wchg,procstat,txn-edit,tcap,ctrace,bpolicy,claude-self,recall}; do [ -L "$l" ] || continue; target=$(readlink "$l"); [ -e "$target" ] || echo "DANGLING: $l -> $target"; done`. List is the canonical 10 tools from `~/.claude/CLAUDE_SELF.md` Defaults section. Most entries on this laptop are regular files (the bootstrap symlink stage hasn't run for them) — the `[ -L ]` guard skips those silently. Dangling symlinks indicate the per-project tree was moved or its build artifacts cleaned; rerun `bootstrap/install.sh --no-hooks` to fix. Report; auto-rerun only if explicitly user-confirmed.
 
