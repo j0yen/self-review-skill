@@ -29,6 +29,7 @@ if [ -x "$reap" ]; then
     "$reap" --apply >/dev/null 2>>"$err" || true
 fi
 
+# Sweep any un-summarized session logs left by prior SIGKILLed sessions.
 
 # Find Claude's PID. The hook may be invoked directly by claude (PPID=claude)
 # or wrapped in a shell (PPID=sh, grandparent=claude). Walk up one if needed.
@@ -67,7 +68,7 @@ fi
 iso=$(date +%Y%m%dT%H%M%S)
 log="$sessions/claude-$iso.ndjson"
 
-if "$ctrace" start --root "$root" --log "$log" >/dev/null 2>"$err"; then
+if "$ctrace" doctor --fix --root "$root" --log "$log" >/dev/null 2>"$err"; then
     printf '{"claude_pid":%s,"started_at":"%s","log":"%s"}\n' \
         "$root" "$iso" "$log" > "$marker"
 fi

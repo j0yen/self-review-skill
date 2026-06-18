@@ -73,7 +73,7 @@ fi
 iso=$(date +%Y%m%dT%H%M%S)
 log="$sessions/claude-$iso.ndjson"
 
-if "$ctrace" start --root "$root" --log "$log" >/dev/null 2>"$err"; then
+if "$ctrace" doctor --fix --root "$root" --log "$log" >/dev/null 2>"$err"; then
     printf '{"claude_pid":%s,"started_at":"%s","log":"%s"}\n' \
         "$root" "$iso" "$log" > "$marker"
 fi
