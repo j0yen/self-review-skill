@@ -166,6 +166,20 @@ The wintermute ecosystem lives at `~/wintermute/` (bootstrap monorepo + per-proj
 - **Subscriber orphans**: list `agorabus subscribe` processes with `pgrep -af 'agorabus subscribe'`; for each, extract the `--session-id` arg and check `agorabus peers | jq -e '.[] | select(.session_id == "<sid>")'`. Subscribers without a matching peer record are orphans (their connection is alive but the daemon dropped the record, likely via the pre-fix collision bug or a guest-publish under an old daemon). Phase B.5 playbook can reap+reattach.
 - **Per-project repos present**: `awk -F'[][]' '/^\| \[/ && /github.com/{print $2}' ~/wintermute/REPOS.md | sort -u` enumerates the ecosystem; cross-reference with `ls -d ~/wintermute/*/.git 2>/dev/null | xargs -n1 dirname | xargs -n1 basename | sort -u` to find any indexed-but-not-cloned (`bootstrap/install.sh` will fix). Report only — don't auto-clone in self-review.
 - **Per-project dirty trees**: `for d in ~/wintermute/*/.git ~/projects/*/.git; do d=${d%/.git}; [ -d "$d/.git" ] || continue; s=$(git -C "$d" status --short 2>/dev/null | wc -l); [ "$s" -gt 0 ] && echo "$d: $s lines dirty"; done`. Carry forward into Pending; do not auto-stash (the user may be mid-edit). Long-standing dirty trees (peon-ping is known) should match a prior recall memory.
+<!-- @build:chaff-start -->
+- **Build-junk repos (chaff, guarded):** runs alongside the dirty-tree count to separate tracked build artifacts from real uncommitted work. If `chaff` is on PATH: run `chaff survey --format json 2>/dev/null` (NDJSON, one object per repo), then compute `REPOS=$(jq -s 'length' ...)`, `FILES=$(jq -s '[.[].tracked_junk] | add // 0' ...)`, `MIB=$(jq -s '[.[].bytes_in_index_est] | add // 0' ... | awk '{printf "%d", $1/1048576}')`. Print: `N repos tracking build junk (M files; B MiB in index)` as a distinct item in the Pending section so the raw dirty-repo count is not inflated by chaff-only repos. If `chaff` is NOT on PATH: print `chaff: not installed` and continue (exit 0, does not block review). Example guard:
+  ```bash
+  if command -v chaff &>/dev/null; then
+    SURVEY=$(chaff survey --format json 2>/dev/null)
+    REPOS=$(echo "$SURVEY" | jq -s 'length' 2>/dev/null || echo 0)
+    FILES=$(echo "$SURVEY" | jq -s '[.[].tracked_junk] | add // 0' 2>/dev/null || echo 0)
+    MIB=$(echo "$SURVEY" | jq -s '[.[].bytes_in_index_est] | add // 0' 2>/dev/null | awk '{printf "%d", $1/1048576}' || echo 0)
+    echo "${REPOS} repos tracking build junk (${FILES} files; ${MIB} MiB in index)"
+  else
+    echo "chaff: not installed"
+  fi
+  ```
+<!-- @build:chaff-end -->
 - **Provenance digest (guarded):** if `colophon` is on PATH, run `colophon digest --format markdown` and paste its output as an additive block in the journal's cruft/disk section — it attributes build-worktrees and stale config to the skill that wrote them. If `colophon` is absent, skip this block silently; existing disk/cruft reporting is unaffected. Example guard:
   ```bash
   if command -v colophon &>/dev/null; then
