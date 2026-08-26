@@ -32,7 +32,7 @@ Interpret the result:
 Facts that changed with the Ubuntu rebuild; every phase below is written against them:
 
 - **Package manager is apt/dpkg + snap.** There is no `pacman`. The wintermute kernel is the dpkg package `linux-image-7.0.11-wintermute` (version `7.0.11-<rel>`), staged as `.deb` files under `~/wintermute/wintermute-kernel/ubuntu/`.
-- **sudo is interactive on carbon.** `sudo -n true` fails, so no phase may depend on sudo succeeding non-interactively. Probe once in Phase A (`SUDO_OK`); any sudo-gated action (apt upgrade, `bpolicy`, `ctrace start`, kernel install) is written to Pending with the pre-filled command when `SUDO_OK=no` instead of being attempted.
+- **sudo is scoped-passwordless on carbon.** `/etc/sudoers.d/90-jsy-selfreview` grants NOPASSWD for ctrace, bpolicy (+bpftool, `test -e /sys/fs/bpf/bpolicy/*`, `cat trace_pipe`), apt-get, dmesg only; anything else (dpkg -i, apt install, sysctl) still prompts. Probe once in Phase A (`SUDO_OK`); any sudo-gated action (apt upgrade, `bpolicy`, `ctrace start`, kernel install) is written to Pending with the pre-filled command when `SUDO_OK=no` instead of being attempted.
 - **Not restored yet**: `trim`, `chaff`, `colophon`, `scribe`, the `/build` state dir (`~/.claude/skills/build/state/`), `~/wintermute/agorabus` source, `~/.local/bin/claude-self-review-headless.sh`, and `~/.local/share/ctrace/` (the bpftrace script lives at `~/wintermute/share/ctrace/session.bt`). Every check that touches one of these is guarded and prints one `<tool>: not installed on carbon` line rather than failing.
 - **`agorabus.service` + `agorabus-restart.path`** are the daemon's lifecycle: the path unit watches `~/.local/bin/agorabus` and restarts the daemon when the binary changes, so a rebuild+install is the whole fix — no manual restart step.
 - **The `wm-*` user units are masked by design** and stay that way; self-review never starts, unmasks, or reports on them.
@@ -90,7 +90,7 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
 - For each Claude PID, `~/.local/bin/procstat snap <pid>` — JSON with RSS, PSS, USS, IO bytes, cgroup limits, uptime. Use this to spot a runaway session (e.g., a Claude process with `vm_rss_bytes` an order of magnitude above its siblings, or `io_write_bytes` growing while `uptime_s` is short).
 
 **sudo availability (carbon):**
-- `sudo -n true 2>/dev/null && SUDO_OK=yes || SUDO_OK=no`. Capture `SUDO_OK`. Every later step marked *(sudo)* checks it: `yes` → run; `no` → Pending line with the exact command for the user to run.
+- `sudo -n -l /usr/bin/dmesg >/dev/null 2>&1 && SUDO_OK=yes || SUDO_OK=no`. Capture `SUDO_OK`. (Scoped NOPASSWD via `/etc/sudoers.d/90-jsy-selfreview` covers ctrace, bpolicy(+bpftool/test/cat trace_pipe), apt-get, dmesg — never `sudo -n true`, which still needs a password.) Every later step marked *(sudo)* checks it: `yes` → run; `no` → Pending line with the exact command for the user to run.
 
 **Network reachability:**
 - `curl -s -o /dev/null -w "%{http_code}\n" --max-time 5 https://api.anthropic.com` — any 2xx/3xx/4xx confirms connectivity; only timeout/connection-refused is a failure.
