@@ -5,7 +5,7 @@ description: Daily self-optimization pass for this laptop. Inspects system healt
 
 # /self-review — Daily self-optimization
 
-This skill is how Claude takes care of its own home. This laptop (`wintermute`) is dedicated to hosting Claude Code, so its health is Claude's responsibility. Run this skill once per day, or whenever the SessionStart hook surfaces "🛠 Self-review is due."
+This skill is how Claude takes care of its own home. This laptop (`carbon`, Ubuntu 26.04 since the 2026-08-25 rebuild; formerly Arch) is dedicated to hosting Claude Code, so its health is Claude's responsibility. Run this skill once per day, or whenever the SessionStart hook surfaces "🛠 Self-review is due."
 
 The pass has seven phases: 0, A, B, **B.5**, C, D, E. Execute them in order. Do not skip phases. Phase B.5 (Investigate) runs known playbooks against signals that landed in "Recommend" — it can either promote a signal into Auto-apply with a concrete fix, or enrich the Pending entry with a deterministic diagnosis.
 
@@ -21,11 +21,22 @@ else echo BUSY; fi
 
 Interpret the result:
 
-- **OWN** — this run's own launcher (`~/.local/bin/claude-self-review-headless.sh`) already holds the lock on our behalf and exported `SELF_REVIEW_LOCK_OWNED=1`. We own it. **Proceed** with Phase 0. (This is the normal headless path; do NOT defer to your own launcher's lock — that was the run-2026-06-02 self-defer bug.)
+- **OWN** — this run's own launcher (`~/.local/bin/claude-self-review-headless.sh`; not restored on carbon yet, so this branch is dormant) already holds the lock on our behalf and exported `SELF_REVIEW_LOCK_OWNED=1`. We own it. **Proceed** with Phase 0. (This is the normal headless path; do NOT defer to your own launcher's lock — that was the run-2026-06-02 self-defer bug.)
 - **FREE** — no run holds the lock. **Proceed** with Phase 0.
 - **BUSY** — a *different* self-review (a headless run, whose launcher holds the `flock` for its whole life) is active. **Stop here** — print `self-review already in progress (lock held); deferring.` and do not proceed. The marker stays set, so the active run covers today.
 
 (Two simultaneous *interactive* invocations are not gated — only headless-vs-anything — but that requires a human to launch two at once, which is not a real concurrency source here.)
+
+### Carbon environment notes (2026-08-25 rebuild)
+
+Facts that changed with the Ubuntu rebuild; every phase below is written against them:
+
+- **Package manager is apt/dpkg + snap.** There is no `pacman`. The wintermute kernel is the dpkg package `linux-image-7.0.11-wintermute` (version `7.0.11-<rel>`), staged as `.deb` files under `~/wintermute/wintermute-kernel/ubuntu/`.
+- **sudo is interactive on carbon.** `sudo -n true` fails, so no phase may depend on sudo succeeding non-interactively. Probe once in Phase A (`SUDO_OK`); any sudo-gated action (apt upgrade, `bpolicy`, `ctrace start`, kernel install) is written to Pending with the pre-filled command when `SUDO_OK=no` instead of being attempted.
+- **Not restored yet**: `trim`, `chaff`, `colophon`, `scribe`, the `/build` state dir (`~/.claude/skills/build/state/`), `~/wintermute/agorabus` source, `~/.local/bin/claude-self-review-headless.sh`, and `~/.local/share/ctrace/` (the bpftrace script lives at `~/wintermute/share/ctrace/session.bt`). Every check that touches one of these is guarded and prints one `<tool>: not installed on carbon` line rather than failing.
+- **`agorabus.service` + `agorabus-restart.path`** are the daemon's lifecycle: the path unit watches `~/.local/bin/agorabus` and restarts the daemon when the binary changes, so a rebuild+install is the whole fix — no manual restart step.
+- **The `wm-*` user units are masked by design** and stay that way; self-review never starts, unmasks, or reports on them.
+- The timers `claude-self-review.timer` / `claude-build.timer` are disabled; the review runs on manual `/self-review` only.
 
 The skill leans on the local `~/.local/bin/` toolchain — `recall`, `ctrace`, `procstat`, `wchg`, `txn-edit` — so the run inherits structured state from prior days rather than recomputing it. Reach for those first; fall back to raw shell only for things they don't cover.
 
@@ -78,6 +89,9 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
 - `muster verdict --format selfreview` — definitive session census with verdicts; falls back to `pgrep -af claude` if `muster` is not on PATH. Surface orphan/stale sessions in Pending but do not auto-kill — reap stays manual/confirmed (`muster reap` requires explicit user confirmation).
 - For each Claude PID, `~/.local/bin/procstat snap <pid>` — JSON with RSS, PSS, USS, IO bytes, cgroup limits, uptime. Use this to spot a runaway session (e.g., a Claude process with `vm_rss_bytes` an order of magnitude above its siblings, or `io_write_bytes` growing while `uptime_s` is short).
 
+**sudo availability (carbon):**
+- `sudo -n true 2>/dev/null && SUDO_OK=yes || SUDO_OK=no`. Capture `SUDO_OK`. Every later step marked *(sudo)* checks it: `yes` → run; `no` → Pending line with the exact command for the user to run.
+
 **Network reachability:**
 - `curl -s -o /dev/null -w "%{http_code}\n" --max-time 5 https://api.anthropic.com` — any 2xx/3xx/4xx confirms connectivity; only timeout/connection-refused is a failure.
 
@@ -103,7 +117,8 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
 - Never-recalled stale memories: scan `recall list` for entries with `recalls=0` whose files are older than 30 days. List but do not delete (recall is the user's long-term memory — only the user should prune it).
 
 **Toolchain freshness:**
-- `pacman -Qu 2>/dev/null` — pending Arch updates (no sync; the timer-driven daily cadence handles sync separately if needed)
+- `apt list --upgradable 2>/dev/null | tail -n +2` — pending Ubuntu updates (reads the local apt cache; do not `apt-get update` here). Capture the list; note any line whose package name contains `linux-image`, `linux-headers`, `linux-modules`, `libc6`, `systemd`, `nvidia`, or `mesa` as **protected**.
+- `snap refresh --list 2>/dev/null | tail -n +2` — pending snap refreshes (report only; snaps auto-refresh on their own schedule).
 - `npm outdated -g --json 2>/dev/null` — global npm packages
 - `pipx list --short 2>/dev/null` — installed pipx packages (note: full outdated check is expensive; skip per-package check unless user requests)
 
@@ -125,7 +140,7 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
   - `loaded:true, enforcing:true` — live enforcement. Quote any entries from `bpolicy log --since 24h` so the user sees what got denied (most often a sign a policy is too tight, not that an attack was blocked).
 - Never `bpolicy enforce` or `bpolicy release` from this skill — policy state changes are the user's call.
 
-**Warden snapshot line (`warden:`):** after running `bpolicy status`, emit exactly one `warden:` summary line for the journal Snapshot section. Parse the JSON defensively (tolerate missing fields; a malformed or empty response yields `warden: status unavailable`):
+**Warden snapshot line (`warden:`):** on carbon `bpolicy status` prints `sudo: interactive authentication is required` on stderr before its JSON when `SUDO_OK=no`; read stdout only (`2>/dev/null`). After running `bpolicy status`, emit exactly one `warden:` summary line for the journal Snapshot section. Parse the JSON defensively (tolerate missing fields; a malformed or empty response yields `warden: status unavailable`):
 
 ```sh
 WARDEN_JSON=$(~/.local/bin/bpolicy status 2>/dev/null || echo '{}')
@@ -162,7 +177,7 @@ Capture the `WARDEN_LINE` and `WARDEN_LOADED` into working memory for Phase B.5.
 The wintermute ecosystem lives at `~/wintermute/` (bootstrap monorepo + per-project clones) and `~/projects/` (autobuilder dev trees). Each per-project repo is published at `github.com/j0yen/<name>`; the canonical index is `~/wintermute/REPOS.md`. Health checks:
 
 - **Bus state**: `pgrep -af 'agorabus daemon' | grep -v pgrep` — daemon PID (one expected). `test -S /home/jsy/.cache/agorabus/sock && echo OK` — socket exists. `agorabus peers | jq -r '.[] | .session_id'` — registered peers. Cross-reference with live Claude PIDs from `pgrep -af claude`: every live Claude session ought to have a matching `claude-<root-pid>-<project>` peer (the SessionStart hook attaches one). Missing-peer-for-live-claude is a ghost-subscriber signal — see Phase B.5 `agorabus_orphan_subscriber`.
-- **Daemon vs source freshness**: run `agorabus doctor` (exit 0=current, 1=stale, 2=unknown) — this is the authoritative process-staleness signal: it compares the running daemon's executing image against the installed binary via `/proc/<pid>/exe` inode, so it catches a rebuilt-but-not-restarted daemon (running a `(deleted)` exe) that a modtime check misses. Also compare modtimes as a complementary "source ahead of binary" signal: `stat -c '%Y' ~/wintermute/agorabus/src/daemon.rs` vs `stat -c '%Y' $(readlink -f $(which agorabus 2>/dev/null) 2>/dev/null)`. If either fires while the daemon is running, the daemon is stale — see Phase B.5 `agorabus_daemon_stale_binary`. (The modtime check bit a 2026-05-24 session: an incremental build silently skipped daemon.rs and the running daemon kept the pre-fix code, dropping peers on every guest-publish. The deleted-exe case bit 2026-05-29, which is why `doctor` now leads.)
+- **Daemon vs source freshness**: `~/wintermute/agorabus` (the source clone) is not restored on carbon yet — when `[ -d ~/wintermute/agorabus ]` is false, skip the modtime comparison below, emit `agorabus source: not on carbon — doctor only`, and treat `binstale`'s "source repo not found" stderr as expected noise. Run `agorabus doctor` (exit 0=current, 1=stale, 2=unknown) — this is the authoritative process-staleness signal: it compares the running daemon's executing image against the installed binary via `/proc/<pid>/exe` inode, so it catches a rebuilt-but-not-restarted daemon (running a `(deleted)` exe) that a modtime check misses. Also compare modtimes as a complementary "source ahead of binary" signal: `stat -c '%Y' ~/wintermute/agorabus/src/daemon.rs` vs `stat -c '%Y' $(readlink -f $(which agorabus 2>/dev/null) 2>/dev/null)`. If either fires while the daemon is running, the daemon is stale — see Phase B.5 `agorabus_daemon_stale_binary`. (The modtime check bit a 2026-05-24 session: an incremental build silently skipped daemon.rs and the running daemon kept the pre-fix code, dropping peers on every guest-publish. The deleted-exe case bit 2026-05-29, which is why `doctor` now leads.)
 - **Subscriber orphans**: list `agorabus subscribe` processes with `pgrep -af 'agorabus subscribe'`; for each, extract the `--session-id` arg and check `agorabus peers | jq -e '.[] | select(.session_id == "<sid>")'`. Subscribers without a matching peer record are orphans (their connection is alive but the daemon dropped the record, likely via the pre-fix collision bug or a guest-publish under an old daemon). Phase B.5 playbook can reap+reattach.
 - **Per-project repos present**: `awk -F'[][]' '/^\| \[/ && /github.com/{print $2}' ~/wintermute/REPOS.md | sort -u` enumerates the ecosystem; cross-reference with `ls -d ~/wintermute/*/.git 2>/dev/null | xargs -n1 dirname | xargs -n1 basename | sort -u` to find any indexed-but-not-cloned (`bootstrap/install.sh` will fix). Report only — don't auto-clone in self-review.
 - **Per-project dirty trees**: `for d in ~/wintermute/*/.git ~/projects/*/.git; do d=${d%/.git}; [ -d "$d/.git" ] || continue; s=$(git -C "$d" status --short 2>/dev/null | wc -l); [ "$s" -gt 0 ] && echo "$d: $s lines dirty"; done`. Carry forward into Pending; do not auto-stash (the user may be mid-edit). Long-standing dirty trees (peon-ping is known) should match a prior recall memory.
@@ -195,11 +210,13 @@ The 2026-05-24 work shipped three kernel features that this laptop can
 now lean on: `memlog` (per-uid context-compaction audit log at
 `/dev/memlog`), `provfs` LSM (xattr-stamped file provenance), and
 `agentns` (per-session id + budget enforcement via CLONE_NEWAGENT).
-They live in the `linux-wintermute` package at
-`~/wintermute/wintermute-kernel/pkg/`. The wintermute kernel is opt-in
-at boot; if the user is running stock `linux`, none of these are
-available — the checks here detect that case and recommend booting the
-wintermute kernel, but never auto-reboot.
+On carbon they ship in the dpkg package `linux-image-7.0.11-wintermute`,
+built from `~/wintermute/wintermute-kernel/` and staged as `.deb` files
+under `~/wintermute/wintermute-kernel/ubuntu/`. The wintermute kernel is
+opt-in at boot (GRUB also carries stock `linux-image-*-generic`); if the
+user is running stock, none of these are available — the checks here
+detect that case and recommend booting the wintermute kernel, but never
+auto-reboot.
 
 - **Booted kernel**: `uname -r`. If the suffix doesn't contain
   `wintermute`, the user is on stock. Skip the remaining kernel-asset
@@ -207,7 +224,8 @@ wintermute kernel, but never auto-reboot.
   available but not booted — `reboot` and pick the wintermute entry to
   unlock memlog / provfs / agentns."
 - **memlog**: Compute the activation state from four probes and emit a
-  single `memlog: <state>` status line:
+  single `memlog: <state>` status line (carbon baseline 2026-08-25: `active` —
+  group `memlog`, `/dev/memlog` gid=memlog, jsy is a member; CLI at `~/.local/bin/memlog`):
 
   ```sh
   # Probe 1: group present?
@@ -216,14 +234,16 @@ wintermute kernel, but never auto-reboot.
   MEMLOG_DEV_GROUP=$(stat -c '%G' /dev/memlog 2>/dev/null || echo unknown)
   # Probe 3: current user a member?
   MEMLOG_MEMBER=$(id -nG 2>/dev/null | grep -qw memlog && echo yes || echo no)
-  # Probe 4: installed pkgrel vs. highest staged pkgrel that contains sysusers asset
-  INST_PKGREL=$(pacman -Q linux-wintermute 2>/dev/null | grep -oE '[0-9]+$')
+  # Probe 4: installed debian revision vs. highest staged .deb revision that carries the memlog sysusers asset
+  INST_PKGREL=$(dpkg-query -W -f='${Version}' linux-image-7.0.11-wintermute 2>/dev/null | sed -n 's/.*-\([0-9][0-9]*\)$/\1/p')
   STAGED_PKGREL=$(
-    for f in ~/wintermute/wintermute-kernel/pkg/linux-wintermute-*-x86_64.pkg.tar.zst; do
-      pr=$(basename "$f" | sed -n 's/.*arch1-\([0-9][0-9]*\)-x86_64.*/\1/p')
-      [ -n "$pr" ] && bsdtar -tf "$f" 2>/dev/null | grep -q 'sysusers.d.*memlog' && echo "$pr"
+    for f in ~/wintermute/wintermute-kernel/ubuntu/linux-image-*-wintermute_*_amd64.deb; do
+      [ -f "$f" ] || continue
+      pr=$(dpkg-deb -f "$f" Version 2>/dev/null | sed -n 's/.*-\([0-9][0-9]*\)$/\1/p')
+      [ -n "$pr" ] && dpkg-deb -c "$f" 2>/dev/null | grep -q 'sysusers.d.*memlog' && echo "$pr"
     done | sort -n | tail -1
   )
+  # (The canonical probe lives in scripts/probes/memlog-state.sh — source it instead of inlining when possible.)
   # Classify
   if [ "$MEMLOG_GROUP" = yes ] && [ "$MEMLOG_DEV_GROUP" = memlog ] && [ "$MEMLOG_MEMBER" = yes ]; then
     MEMLOG_STATE=active
@@ -241,7 +261,7 @@ wintermute kernel, but never auto-reboot.
 
   Capture `MEMLOG_STATE` into working memory. States:
   - `active` — group present, `/dev/memlog` gid=memlog, user is a member:
-    if user is in group, also run `~/wintermute/memlog/cli/memlog stats
+    if user is in group, also run `memlog stats
     --format json` and capture `records_in_ring`, `ring_bytes`,
     `ring_capacity`, `total_evictions`; if ring saturated
     (`ring_bytes >= 0.9 * ring_capacity` AND `total_evictions > 0`) see
@@ -292,10 +312,11 @@ Cross-session aggregation (the high-leverage view — summaries miss daily trend
 Hygiene checks:
 - **Sessions missing summaries**: for every today's `*.ndjson` without a matching `*.summary.md`, flag it — this is the trigger for the Phase B.5 `ctrace_scribe_backfill` playbook. If `scribe` is installed, backfill runs automatically there; if not, the missing summaries land in Pending for user investigation. Do not attempt to regenerate them here (Phase A is read-only).
 - **Stale tracer**: `~/.local/bin/ctrace status | jq -r '.running, (.started_at // 0)'` — if `running == true` AND `started_at` is older than 24h, this is a leaked tracer. **Auto-reap in Phase D** (`ctrace stop`); previously was flag-only.
-- **Start-hook errors**: `[ -s /home/jsy/.cache/ctrace/claude-start.err ] && tail -5 /home/jsy/.cache/ctrace/claude-start.err` — non-empty means recent SessionStart failures (usually sudo).
+- **Start-hook errors**: `[ -s /home/jsy/.cache/ctrace/claude-start.err ] && tail -5 /home/jsy/.cache/ctrace/claude-start.err` — non-empty means recent SessionStart failures (usually sudo). Carbon-specific: `missing script: ~/.local/share/ctrace/session.bt` means the bpftrace script dir was not restored — the script lives at `~/wintermute/share/ctrace/session.bt`. See Phase B.5 `ctrace_script_dir_missing`.
 - **Old ndjson logs**: `find /home/jsy/.cache/ctrace/sessions -name 'claude-*.ndjson' -mtime +30 -printf '%p\t%s\n'` — candidates for pruning in Phase D. Keep summaries forever; only prune the raw ndjson.
 
 **/build manifest health:**
+- **Guard**: `[ -f ~/.claude/skills/build/state/manifest.json ] || echo "build manifest: absent on carbon (/build state not restored) — blocker check skipped"`. When absent, skip the rest of this block and the `build_stale_blockers` playbook; no Pending item.
 - **Open blockers**: `jq -r '.prds | to_entries[] | select(.value.blockers | length > 0) | "\(.key)\t\(.value.blockers | join(" | "))"' ~/.claude/skills/build/state/manifest.json` — any PRD with non-empty `blockers[]`. Each one is a reason `/build` won't advance that PRD on its rotation. Blockers are plain strings written by past ticks; they don't carry timestamps and the skill doesn't re-evaluate them on subsequent scans, so they accumulate. Two shapes recur: version-collision (`"v0.5.0 collision with <other-slug>"`) and AC-dependency (`"AC-10 gated on <other-slug>..."`). See Phase B.5 `build_stale_blockers`.
 
 ## Phase B — Categorize
@@ -314,12 +335,12 @@ Sort every finding into one of three buckets. Be explicit — if you cannot plac
 - If the `recall` index and on-disk file counts diverge (orphan files or missing files), run `recall reindex` — this rebuilds the SQLite index from the markdown files of record, which is the authoritative source.
 - `npm update -g` if `npm outdated -g` was non-empty. On this laptop `/usr/lib/node_modules/` is root-owned, so the bare command fails `EACCES`; retry under `sudo npm update -g` (sudo is pre-approved). Log both the failed attempt and the retry — apply-log is append-only.
 - `pipx upgrade-all` if any pipx packages exist.
-- If `pacman -Qu` output is non-empty **and** none of the lines contain any of the substrings `linux`, `glibc`, `systemd`, `nvidia`, `mesa`, run `sudo pacman -Syu --noconfirm`. Note: `pacman -Qu` reflects the *local* sync db, which can be stale; the `-Syu` will refresh it and may legitimately report "nothing to do." That's not an error.
+- *(sudo)* If `apt list --upgradable` is non-empty **and** no line is protected (`linux-image`, `linux-headers`, `linux-modules`, `libc6`, `systemd`, `nvidia`, `mesa`) **and** `SUDO_OK=yes`, run `sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y`. Never `dist-upgrade`/`full-upgrade` — that can remove `linux-image-7.0.11-wintermute`. When `SUDO_OK=no` the command goes to Pending verbatim.
 
 ### Recommend, don't apply (write under "## Pending your call")
 
 - Duplicate Claude processes. Do not kill — they may be live sessions.
-- `pacman -Syu` when the queue contains any of the protected substrings above. Quote the offending lines.
+- `apt-get upgrade` when the queue contains any protected package above, or when `SUDO_OK=no`. Quote the offending lines and the exact command.
 - Plugin installs the user might benefit from. List candidates, never auto-install.
 - settings.json structural changes other than the permission-allowlist case below.
 - Cache directories outside `~/.claude` that are large (e.g., Firefox cache > 1 GB). Mention but do not touch.
@@ -411,6 +432,18 @@ echo "$LITMUS_BANNER"
 
 Capture `LITMUS_JSON`, `LITMUS_COUNT`, and `LITMUS_BANNER` into working memory for Phase E journaling. The banner reads uniformly alongside the `docket digest` and `plumb_gate` output that precede it in Phase B.5.
 
+### Playbook: `ctrace_script_dir_missing`
+
+**Trigger**: `~/.cache/ctrace/claude-start.err` contains `missing script: /home/jsy/.local/share/ctrace/session.bt` (or `[ ! -e ~/.local/share/ctrace/session.bt ]`) AND `[ -f ~/wintermute/share/ctrace/session.bt ]`.
+
+**Investigation (read-only)**: `ls -ld ~/.local/share/ctrace ~/wintermute/share/ctrace` — record whether the target exists as a dir, a symlink, or nothing.
+
+**Auto-fix conditions**: `~/.local/share/ctrace` does not exist (nothing to clobber) AND `~/wintermute/share/ctrace/session.bt` is a regular file.
+
+**Fix**: `ln -s ~/wintermute/share/ctrace ~/.local/share/ctrace`, then `[ -f ~/.local/share/ctrace/session.bt ]` → `step:fix_verified`. This only creates a symlink under `~/.local`; the tracer itself still needs sudo (`ctrace_tracer_down` handles that, gated on `SUDO_OK`).
+
+**Escalation**: if `~/.local/share/ctrace` exists but lacks `session.bt`, write to Pending with the `ls -ld` output — do not overwrite whatever is there.
+
 ### Playbook: `ctrace_tracer_down`
 
 **Trigger**: `ctrace status` returns `running:false` AND `pgrep -af claude` lists ≥1 PID that is not the current self-review session.
@@ -424,7 +457,8 @@ Capture `LITMUS_JSON`, `LITMUS_COUNT`, and `LITMUS_BANNER` into working memory f
 **Auto-fix conditions** (ALL must hold to attempt the restart):
 - `command -v bpftrace` returns a path.
 - `procstat snap <youngest-pid>` returns valid JSON (the target is alive).
-- `claude-start.err` is empty OR contains only `sudo: a password is required` (pre-approved sudo on this laptop).
+- `SUDO_OK=yes` (carbon's sudo is interactive; when `no`, escalate with the pre-filled `sudo ~/.local/bin/ctrace start --root <pid>` instead of attempting).
+- `claude-start.err` is empty OR contains only sudo-related lines.
 - The most recent `investigate.ctrace_tracer_down` entry with `step:fix_attempted` in `apply-log.jsonl` is >5 minutes ago, OR there is no prior entry. **This is the loop-breaker** — never attempt a second restart inside 5 minutes, even across self-review runs.
 
 **Fix**: `sudo ~/.local/bin/ctrace start --root <youngest-pid>`. Then wait 2s and re-run `ctrace status`; log `step:fix_verified` if `running:true`, else `step:fix_failed` with the stderr.
@@ -489,14 +523,13 @@ Capture `LITMUS_JSON`, `LITMUS_COUNT`, and `LITMUS_BANNER` into working memory f
    - `status: failed` → reload itself failed (cargo error or socket issue); log `step:fix_failed` with the verdict and fall through to escalation.
 3. After a `reloaded` verdict, confirm with `agorabus doctor` (exit 0) as an additional sanity check. Log the doctor verdict in apply-log.
 
-**Fix (legacy path — only when `agorabus reload` is absent)**:
-1. `(source ~/.cargo/env && cd ~/wintermute/agorabus && cargo build --release --quiet)` — log stderr on nonzero exit; if it fails, abort and escalate (do not restart with a half-built binary).
-2. `install -m755 ~/wintermute/agorabus/target/release/agorabus ~/.local/bin/agorabus` — **required and easy to forget**: `~/.local/bin/agorabus` is a regular-file copy (not a symlink to `target/release`), and the daemon launches from it. Skip this and step 3 relaunches the *same stale binary* — the exact "a bounce alone won't fix it" trap, and `doctor` in step 5 will report stale → fix_failed.
-3. `systemctl --user restart agorabus.service` — the daemon is a systemd user unit now (`Restart=on-failure`, `WantedBy=wintermute.target`). **Never** `kill`+`nohup` it: that orphans an unmanaged daemon outside systemd and collides on the socket.
-4. Wait ~1s; verify `test -S ~/.cache/agorabus/sock` and `systemctl --user is-active agorabus.service` is `active`.
+**Fix (legacy path — only when `agorabus reload` is absent)**. Precondition: `[ -d ~/wintermute/agorabus ]`; on carbon the source clone is absent, so this path escalates with "agorabus source not restored — clone `j0yen/agorabus` to `~/wintermute/agorabus` first" and stops.
+1. `(source ~/.cargo/env && cd ~/wintermute/agorabus && cargo build --release --quiet)` — log stderr on nonzero exit; if it fails, abort and escalate (do not restart with a half-built binary). (Per standing policy heavy cargo goes through `/cloudbuild`; agorabus is small enough that a local incremental build is acceptable here.)
+2. `install -m755 ~/wintermute/agorabus/target/release/agorabus ~/.local/bin/agorabus` — **required and easy to forget**: `~/.local/bin/agorabus` is a regular-file copy (not a symlink to `target/release`), and the daemon launches from it. On carbon `agorabus-restart.path` watches this file and restarts `agorabus.service` on change, so the install *is* the restart.
+3. If, after ~3s, `agorabus doctor` still reports stale (the path unit missed the change), `systemctl --user restart agorabus.service`. **Never** `kill`+`nohup` it: that orphans an unmanaged daemon outside systemd and collides on the socket.
+4. Wait ~1s; verify `test -S ~/.cache/agorabus/sock` and a daemon PID from `pgrep -af 'agorabus daemon'`.
 5. **Authoritative verification**: `agorabus doctor` must exit 0 (`verdict: current`) — confirms the new daemon is executing the freshly-installed binary, not just that *a* socket bound. Capture the verdict object into the apply-log.
-6. The restart drops every peer (the voice fleet are fail-closed bus clients with no auto-restart). Bring them back: `systemctl --user start wmd.service wm-stt.service wm-tts.service wm-dialog.service`, then confirm with `agorabus peers | jq 'length'` (expect the fleet to re-announce). `wm-audio.service` stays up on its own and does not announce as a peer.
-7. `~/.claude/scripts/agorabus-session-start.sh` to re-register this self-review session. Other live Claude sessions will need to re-run their SessionStart hook to reattach after this restart.
+6. `~/.claude/scripts/agorabus-session-start.sh` to re-register this self-review session. Other live Claude sessions will need to re-run their SessionStart hook to reattach after this restart.
 
 Log `step:fix_verified` only if `agorabus doctor` reports `current` (and the socket is bound); `step:fix_failed` with `journalctl --user -u agorabus.service -n 20 --no-pager` and the doctor verdict otherwise.
 
@@ -570,7 +603,7 @@ in ring, M evictions, window covers W seconds; consider
    `apply-log.jsonl` with `memlog_state`, `inst_pkgrel`, `staged_pkgrel`, `ack_key`,
    `already_acked`.
 
-**Auto-fix**: NONE. This playbook never runs `pacman -U`, reboots, or modifies
+**Auto-fix**: NONE. This playbook never runs `dpkg -i`/`apt install`, reboots, or modifies
 group membership. Kernel install + reboot is a user decision.
 
 **If `MEMLOG_ACK=yes`**: emit a single carry line in the Snapshot section —
@@ -588,7 +621,7 @@ For state `staged-awaiting-install`:
   EACCES on /dev/memlog is expected on pkgrel-<INST_PKGREL> — not a bug.
 
   Activate (full install):
-    sudo pacman -U ~/wintermute/wintermute-kernel/pkg/linux-wintermute-7.0.10.arch1-<STAGED_PKGREL>-x86_64.pkg.tar.zst
+    sudo dpkg -i ~/wintermute/wintermute-kernel/ubuntu/linux-image-7.0.11-wintermute_7.0.11-<STAGED_PKGREL>_amd64.deb
     # then reboot (or no-reboot alt below if driver is already loaded)
 
   No-reboot alternative (driver already loaded via current pkgrel):
@@ -620,8 +653,7 @@ For state `unstaged` (regression — no staged pkgrel carries the sysusers asset
   ~/wintermute/wintermute-kernel/pkg/ carries the sysusers/udev assets
   for the memlog group. This is a real defect — the sysusers conf was
   present in pkgrel-6 and should have survived forward. Investigate:
-    bsdtar -tf ~/wintermute/wintermute-kernel/pkg/linux-wintermute-*.pkg.tar.zst \
-      | grep sysusers
+    for f in ~/wintermute/wintermute-kernel/ubuntu/linux-image-*.deb; do dpkg-deb -c "$f" | grep sysusers; done
   (This escalation fires on every run until the asset is found — unstaged
   is a genuine regression, not a parked item.)
 ```
@@ -670,7 +702,7 @@ spot-check `getfattr -n user.prov.session <a-recently-modified-file>`
 returns no value AND the file is NOT under a skip-prefix
 (`/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `.git`, `node_modules`,
 `target`, `.cargo/registry`, `/var/run`, `/var/cache`,
-`/var/lib/pacman`).
+`/var/lib/dpkg`, `/var/lib/apt`).
 
 **Investigation (read-only)**:
 1. `dmesg -t | grep -iE 'provfs|__vfs_setxattr_noperm' | tail -10` —
@@ -1100,7 +1132,7 @@ Order:
 8. `recall reindex` if the index was out of sync with files on disk.
 9. Run `npm update -g` if applicable.
 10. Run `pipx upgrade-all` if applicable.
-11. Run `sudo pacman -Syu --noconfirm` only if the guardrails above permit.
+11. Run `sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y` only if the guardrails above permit and `SUDO_OK=yes`.
 12. Invoke `Skill(fewer-permission-prompts)` if the special case was hit.
 13. Clear stale /build blockers if Phase B.5 `build_stale_blockers` promoted to auto-fix: run `~/.claude/skills/build/scripts/clear-stale-blockers.sh`, capture stdout, append one apply-log entry with `"action":"clear_build_blockers"` and the JSON summary inlined. Exit code 2 (no blockers) is `"result":"noop"`, exit 0 is `"result":"ok"` (record `cleared_count` and `surfaced_count`), exit 1 is `"result":"error"`.
 14. Execute the ctrace backfill if Phase B.5 `ctrace_scribe_backfill` promoted it to auto-fix (all conditions met, `scribe` installed, `N_missing > 0`). Run the wchg-scoped `scribe backfill ~/.cache/ctrace/sessions`, verify scope, run the residual check, then run `scribe rollup --since today --format md` and capture output for Phase E. Append apply-log entry with `"action":"ctrace_scribe_backfill"` and rendered/skipped/residual counts. On failure, log `"result":"error"` and continue.
@@ -1253,7 +1285,8 @@ These exist because "full autonomy" is bounded autonomy. A future invocation of 
 2. **Never kill a process.** Duplicate Claude PIDs go in "Pending your call." The user decides. The single exception is `ctrace stop` against a leaked tracer where `status.running == true` AND `started_at > 24h`; that's reaping infrastructure, not killing a user session.
 3. **Never edit `~/.claude/settings.json` directly.** Always go through `Skill(update-config)`.
 4. **Never auto-install plugins.** Recommendations only.
-5. **Never `pacman -Syu` when the queue contains `linux`, `glibc`, `systemd`, `nvidia`, or `mesa`** (substring match on the package name column). Kernel/init/driver updates can require reboot or break boot — they belong to the user.
+5. **Never `apt-get upgrade` when the queue contains `linux-image`, `linux-headers`, `linux-modules`, `libc6`, `systemd`, `nvidia`, or `mesa`** (substring match on the package name column), and never `dist-upgrade`/`full-upgrade`/`autoremove` — any of those can drop or displace `linux-image-7.0.11-wintermute`. Kernel/init/driver updates can require reboot or break boot — they belong to the user.
+5a. **Never attempt a sudo command when `SUDO_OK=no`.** A hung password prompt inside a Bash tool call stalls the whole review; write the command to Pending instead.
 6. **Never delete files in `/home/jsy/brain/`** other than the explicitly transient state files listed above (`review-due`, `today-plan.txt`). Journal entries and archived plans accumulate forever.
 7. **Never `recall delete`.** The recall store is the user's long-term memory; pruning is theirs alone. Surface stale/never-recalled entries in "Pending your call," nothing more.
 8. **All MEMORY.md mutations go through `txn-edit`.** Snap before, commit after, rollback on error. Direct rewrites are forbidden because a stray edit can silently delete a memory pointer.
@@ -1302,5 +1335,5 @@ in the journal for human readability.
 ## Future work (intentionally not wired up)
 
 - `bpolicy enforce` against the self-review's own write surface would turn guardrails #1, #6, #8 from prose into kernel-level enforcement. The Phase A `bpolicy status` check is read-only — we observe the policy state but don't drive it. Wiring enforcement requires enumerating the write surface of `update-config` and `fewer-permission-prompts` first; once those are documented, a `bpolicy load` of a self-review-scoped policy becomes a pre-Phase-D wrapper.
-- `sbx` would be the natural way to run third-party update commands (`npm`, `pipx`, `pacman -Qu`) in a network-scoped sandbox. Not needed today since all of those are trusted package managers; reconsider if the skill ever pulls less-trusted scripts.
-- `pevent run` could background `pacman -Qu` (cold-cache slow) so it runs in parallel with the other Phase A checks. Overkill for now — the whole pass is sub-30s. (Note: `pevent list`/`gc` ARE wired in Phase A and Phase D; only the `run` direction is deferred.)
+- `sbx` would be the natural way to run third-party update commands (`npm`, `pipx`, `apt list --upgradable`) in a network-scoped sandbox. Not needed today since all of those are trusted package managers; reconsider if the skill ever pulls less-trusted scripts.
+- `pevent run` could background `apt list --upgradable` (cold-cache slow) so it runs in parallel with the other Phase A checks. Overkill for now — the whole pass is sub-30s. (Note: `pevent list`/`gc` ARE wired in Phase A and Phase D; only the `run` direction is deferred.)

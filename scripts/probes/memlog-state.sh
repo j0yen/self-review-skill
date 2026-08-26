@@ -5,7 +5,7 @@
 #   PROBE_MEMLOG_GROUP_CMD  — command to test group existence (default: getent group memlog)
 #   PROBE_DEV_MEMLOG        — path to /dev/memlog substitute (default: /dev/memlog)
 #   PROBE_STAGED_PKGREL     — override STAGED_PKGREL directly (skip pkg scan)
-#   PROBE_INST_PKGREL       — override INST_PKGREL directly (skip pacman -Q)
+#   PROBE_INST_PKGREL       — override INST_PKGREL directly (skip dpkg-query)
 #   PROBE_USER_GROUPS       — space-separated group list for membership check (default: run id -nG)
 #
 # Output variable set in caller's environment (source this file):
@@ -34,16 +34,18 @@ fi
 if [ -n "${PROBE_INST_PKGREL+x}" ]; then
     INST_PKGREL="$PROBE_INST_PKGREL"
 else
-    INST_PKGREL=$(pacman -Q linux-wintermute 2>/dev/null | grep -oE '[0-9]+$')
+    # carbon (Ubuntu): debian revision of the installed wintermute kernel image
+    INST_PKGREL=$(dpkg-query -W -f='${Version}' linux-image-7.0.11-wintermute 2>/dev/null | sed -n 's/.*-\([0-9][0-9]*\)$/\1/p')
 fi
 
 if [ -n "${PROBE_STAGED_PKGREL+x}" ]; then
     STAGED_PKGREL="$PROBE_STAGED_PKGREL"
 else
     STAGED_PKGREL=$(
-        for f in "$HOME"/wintermute/wintermute-kernel/pkg/linux-wintermute-*-x86_64.pkg.tar.zst; do
-            pr=$(basename "$f" | sed -n 's/.*arch1-\([0-9][0-9]*\)-x86_64.*/\1/p')
-            [ -n "$pr" ] && bsdtar -tf "$f" 2>/dev/null | grep -q 'sysusers.d.*memlog' && echo "$pr"
+        for f in "$HOME"/wintermute/wintermute-kernel/ubuntu/linux-image-*-wintermute_*_amd64.deb; do
+            [ -f "$f" ] || continue
+            pr=$(dpkg-deb -f "$f" Version 2>/dev/null | sed -n 's/.*-\([0-9][0-9]*\)$/\1/p')
+            [ -n "$pr" ] && dpkg-deb -c "$f" 2>/dev/null | grep -q 'sysusers.d.*memlog' && echo "$pr"
         done | sort -n | tail -1
     )
 fi
