@@ -176,6 +176,7 @@ Capture the `WARDEN_LINE` and `WARDEN_LOADED` into working memory for Phase B.5.
 
 The wintermute ecosystem lives at `~/wintermute/` (bootstrap monorepo + per-project clones) and `~/projects/` (autobuilder dev trees). Each per-project repo is published at `github.com/j0yen/<name>`; the canonical index is `~/wintermute/REPOS.md`. Health checks:
 
+- **Fleet sources**: `fleet-sync check` (or read `~/brain/state/fleet-drift.txt`, written hourly). Any non-`ok` row → Phase B.5 `fleet_sources_drift`.
 - **Bus state**: `pgrep -af 'agorabus daemon' | grep -v pgrep` — daemon PID (one expected). `test -S /home/jsy/.cache/agorabus/sock && echo OK` — socket exists. `agorabus peers | jq -r '.[] | .session_id'` — registered peers. Cross-reference with live Claude PIDs from `pgrep -af claude`: every live Claude session ought to have a matching `claude-<root-pid>-<project>` peer (the SessionStart hook attaches one). Missing-peer-for-live-claude is a ghost-subscriber signal — see Phase B.5 `agorabus_orphan_subscriber`.
 - **Daemon vs source freshness**: `~/wintermute/agorabus` (the source clone) is not restored on carbon yet — when `[ -d ~/wintermute/agorabus ]` is false, skip the modtime comparison below, emit `agorabus source: not on carbon — doctor only`, and treat `binstale`'s "source repo not found" stderr as expected noise. Run `agorabus doctor` (exit 0=current, 1=stale, 2=unknown) — this is the authoritative process-staleness signal: it compares the running daemon's executing image against the installed binary via `/proc/<pid>/exe` inode, so it catches a rebuilt-but-not-restarted daemon (running a `(deleted)` exe) that a modtime check misses. Also compare modtimes as a complementary "source ahead of binary" signal: `stat -c '%Y' ~/wintermute/agorabus/src/daemon.rs` vs `stat -c '%Y' $(readlink -f $(which agorabus 2>/dev/null) 2>/dev/null)`. If either fires while the daemon is running, the daemon is stale — see Phase B.5 `agorabus_daemon_stale_binary`. (The modtime check bit a 2026-05-24 session: an incremental build silently skipped daemon.rs and the running daemon kept the pre-fix code, dropping peers on every guest-publish. The deleted-exe case bit 2026-05-29, which is why `doctor` now leads.)
 - **Subscriber orphans**: list `agorabus subscribe` processes with `pgrep -af 'agorabus subscribe'`; for each, extract the `--session-id` arg and check `agorabus peers | jq -e '.[] | select(.session_id == "<sid>")'`. Subscribers without a matching peer record are orphans (their connection is alive but the daemon dropped the record, likely via the pre-fix collision bug or a guest-publish under an old daemon). Phase B.5 playbook can reap+reattach.
@@ -431,6 +432,25 @@ echo "$LITMUS_BANNER"
 **If `docket` is absent on PATH**: emit `litmus: docket absent — skipped` and continue. Fail-open — this banner must never block a review pass.
 
 Capture `LITMUS_JSON`, `LITMUS_COUNT`, and `LITMUS_BANNER` into working memory for Phase E journaling. The banner reads uniformly alongside the `docket digest` and `plumb_gate` output that precede it in Phase B.5.
+
+### Playbook: `fleet_sources_drift`
+
+**Signal:** `~/brain/state/fleet-drift.txt` is non-empty, or `fleet-sync check`
+exits 1. One line per drifted source: `missing`, `wrong-remote`, `wrong-branch`,
+`dirty`, `ahead`, `behind`, `wrong-link`, `unreachable`.
+
+**Why it matters:** on 2026-09-02 two nodes ran different branches of `/build`
+and two unrelated `/autobuilder` repositories; a fleet of PRDs was drafted to a
+contract one node could not read. `fleet-sync` (`~/wintermute/fleet-sync`,
+manifest `fleet.json`) names the one repo, branch, clone and symlink per skill.
+
+**Auto-apply:** `fleet-sync apply` — clones what is missing, switches branch
+when nothing is lost, fast-forwards, relinks. Safe by construction: it never
+touches a clone with uncommitted or unpushed work.
+
+**Escalate (Pending your call):** `dirty` or `ahead` lines. Name the clone and
+the count; the fix is a commit or a push by the human. `unreachable` when the
+network is down is noise; when it persists across two runs, escalate.
 
 ### Playbook: `ctrace_script_dir_missing`
 
