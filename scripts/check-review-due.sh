@@ -31,6 +31,13 @@ if [ -s "$drift_file" ]; then
     [ -n "$drift" ] && msg="${msg:+$msg }⚠ fleet-sync drift on $(hostname): $drift — run \`fleet-sync apply\` (dirty/ahead need a commit or push)."
 fi
 
+# Fleet names (FLEET.md is carried to every node by fleet-sync): one line so
+# every session on every node uses Joe's machine names.
+fleet_md="$HOME/wintermute/fleet-sync/FLEET.md"
+if [ -f "$fleet_md" ]; then
+    msg="${msg:+$msg }Fleet: RedBaron = Joe's workstation and the Rust build machine (cargo runs there, locally or via /rustbuild's shim from other nodes); carbon = laptop; ryzen7 = may be off; Wintermute Hub (hub) = Hetzner NATS/central server, builds nothing. Details: $fleet_md."
+fi
+
 if [ -n "$msg" ]; then
     printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$msg"
 fi
