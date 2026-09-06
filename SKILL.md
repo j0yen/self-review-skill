@@ -86,21 +86,7 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
   fi
   ```
 - `uptime` — load
-- **wiki tending (summa lint, guarded):** if `summa` is on PATH, run `summa lint --fix --json`, journal exactly one `summa:` line with the finding counts, and list any files behind a `malformed` finding (a parse error, not a health-check result — surfaced separately so a broken frontmatter block doesn't hide inside a count). If `summa` is absent, emit nothing and continue — no Pending item, no error (PRD-summa-lint-selfreview). `--fix` only touches generated artifacts (the index, repairable link syntax) and is idempotent, same risk class as the other guarded auto-fixes in this phase. Example guard:
-  ```bash
-  if command -v summa &>/dev/null; then
-    OUT=$(summa lint --fix --json 2>/dev/null) && python3 -c "
-import json,sys
-d = json.loads(sys.argv[1])
-print('summa: dangling={} orphans={} unindexed={} uningested={}'.format(
-    len(d.get('dangling', [])), len(d.get('orphans', [])),
-    len(d.get('missing_index', [])), len(d.get('un_ingested', []))))
-mf = d.get('malformed_frontmatter', [])
-if mf:
-    print('summa: malformed frontmatter — ' + ', '.join(m['file'] for m in mf))
-" "$OUT" 2>/dev/null || true
-  fi
-  ```
+- **wiki tending (summa lint, guarded):** see the "Wiki health" block below (Phase B.5 section) for the guarded `summa lint --fix --json` invocation and its exactly-one-`summa:`-line contract (PRD-summa-lint-selfreview P0 AC4, AC5). Not duplicated here — a single call site avoids running `--fix` twice per review and avoids the two-`summa:`-lines bug an earlier draft of this block had.
 - `muster verdict --format selfreview` — definitive session census with verdicts; falls back to `pgrep -af claude` if `muster` is not on PATH. Surface orphan/stale sessions in Pending but do not auto-kill — reap stays manual/confirmed (`muster reap` requires explicit user confirmation).
 - For each Claude PID, `~/.local/bin/procstat snap <pid>` — JSON with RSS, PSS, USS, IO bytes, cgroup limits, uptime. Use this to spot a runaway session (e.g., a Claude process with `vm_rss_bytes` an order of magnitude above its siblings, or `io_write_bytes` growing while `uptime_s` is short).
 
