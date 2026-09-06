@@ -86,6 +86,21 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
   fi
   ```
 - `uptime` — load
+- **wiki tending (summa lint, guarded):** if `summa` is on PATH, run `summa lint --fix --json`, journal exactly one `summa:` line with the finding counts, and list any files behind a `malformed` finding (a parse error, not a health-check result — surfaced separately so a broken frontmatter block doesn't hide inside a count). If `summa` is absent, emit nothing and continue — no Pending item, no error (PRD-summa-lint-selfreview). `--fix` only touches generated artifacts (the index, repairable link syntax) and is idempotent, same risk class as the other guarded auto-fixes in this phase. Example guard:
+  ```bash
+  if command -v summa &>/dev/null; then
+    OUT=$(summa lint --fix --json 2>/dev/null) && python3 -c "
+import json,sys
+d = json.loads(sys.argv[1])
+print('summa: dangling={} orphans={} unindexed={} uningested={}'.format(
+    len(d.get('dangling', [])), len(d.get('orphans', [])),
+    len(d.get('missing_index', [])), len(d.get('un_ingested', []))))
+mf = d.get('malformed_frontmatter', [])
+if mf:
+    print('summa: malformed frontmatter — ' + ', '.join(m['file'] for m in mf))
+" "$OUT" 2>/dev/null || true
+  fi
+  ```
 - `muster verdict --format selfreview` — definitive session census with verdicts; falls back to `pgrep -af claude` if `muster` is not on PATH. Surface orphan/stale sessions in Pending but do not auto-kill — reap stays manual/confirmed (`muster reap` requires explicit user confirmation).
 - For each Claude PID, `~/.local/bin/procstat snap <pid>` — JSON with RSS, PSS, USS, IO bytes, cgroup limits, uptime. Use this to spot a runaway session (e.g., a Claude process with `vm_rss_bytes` an order of magnitude above its siblings, or `io_write_bytes` growing while `uptime_s` is short).
 
@@ -171,6 +186,35 @@ Example outputs:
 - `warden: status unavailable` — bpolicy binary missing or returned malformed JSON
 
 Capture the `WARDEN_LINE` and `WARDEN_LOADED` into working memory for Phase B.5.
+
+**Wiki health (`summa`, guarded):** if `summa` is on PATH, run `summa lint --fix --json` and journal exactly one `summa:` counts line, plus one `summa-malformed:` line per file with unparseable frontmatter (path + parser error — these need a human, not a mechanical fix). If `summa` is absent from PATH, emit nothing and continue; this block is additive and never blocks the rest of the review. `--fix` here only touches generated artifacts and link syntax (index regeneration, case/spacing/alias-normalizable dangling links) — it never edits page prose, never deletes an orphan, and never auto-ingests the un-ingested backlog. Example guard:
+
+```bash
+if command -v summa &>/dev/null; then
+  SUMMA_JSON=$(summa lint --fix --json 2>/dev/null || echo '{}')
+  echo "$SUMMA_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+dangling = len(d.get('dangling', []))
+repairable = len(d.get('repairable_dangling', []))
+orphans = len(d.get('orphans', []))
+unindexed = len(d.get('missing_index', []))
+uningested = len(d.get('un_ingested', []))
+print(f'summa: dangling={dangling} repairable={repairable} orphans={orphans} unindexed={unindexed} uningested={uningested}')
+for m in d.get('malformed_frontmatter', []):
+    print(f\"summa-malformed: {m.get('file')} — {m.get('error')}\")
+" 2>/dev/null || true
+else
+  echo "summa: not installed"
+fi
+```
+
+Example outputs:
+- `summa: dangling=471 repairable=0 orphans=2 unindexed=0 uningested=118` — healthy day, repairable backlog already at zero
+- `summa-malformed: references/cagan-empowered.md — did not find expected key at line 11 column 28, while parsing a block mapping` — a human needs to quote that file's frontmatter; lint keeps reporting everything else regardless
+- `summa: not installed` — `summa` absent from PATH; block is a no-op
+
+An `uningested` count that keeps climbing week over week (vs. holding roughly flat) is the trigger to escalate from this journal line to a Pending docket finding — see PRD-summa-lint-selfreview's open question on the exact threshold; until that's settled, note a sustained upward trend in Pending rather than picking a number here.
 
 **Wintermute ecosystem (agorabus bus + per-project repos + bootstrap):**
 
