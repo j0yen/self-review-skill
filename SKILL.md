@@ -190,15 +190,13 @@ print(f'summa: dangling={dangling} repairable={repairable} orphans={orphans} uni
 for m in d.get('malformed_frontmatter', []):
     print(f\"summa-malformed: {m.get('file')} — {m.get('error')}\")
 " 2>/dev/null || true
-else
-  echo "summa: not installed"
 fi
 ```
 
 Example outputs:
 - `summa: dangling=471 repairable=0 orphans=2 unindexed=0 uningested=118` — healthy day, repairable backlog already at zero
 - `summa-malformed: references/cagan-empowered.md — did not find expected key at line 11 column 28, while parsing a block mapping` — a human needs to quote that file's frontmatter; lint keeps reporting everything else regardless
-- `summa: not installed` — `summa` absent from PATH; block is a no-op
+- (nothing) — `summa` absent from PATH; block is a true no-op, per AC4
 
 An `uningested` count that keeps climbing week over week (vs. holding roughly flat) is the trigger to escalate from this journal line to a Pending docket finding — see PRD-summa-lint-selfreview's open question on the exact threshold; until that's settled, note a sustained upward trend in Pending rather than picking a number here.
 
