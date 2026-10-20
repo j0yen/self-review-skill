@@ -19,7 +19,9 @@ else
 fi
 
 msg=""
-if [ "$due" -eq 1 ]; then
+# CLAUDE_LEAN_START=1 / SEAT_LEAN=1 (operator seat, controller): skip the nag, keep drift + fleet names.
+lean=0; { [ "${CLAUDE_LEAN_START:-}" = 1 ] || [ "${SEAT_LEAN:-}" = 1 ]; } && lean=1
+if [ "$due" -eq 1 ] && [ "$lean" -eq 0 ]; then
     msg="🛠 Self-review is due. Run /self-review when you have a moment — it inspects this laptop, cleans up cruft, and journals to /home/jsy/brain/journal/."
 fi
 
