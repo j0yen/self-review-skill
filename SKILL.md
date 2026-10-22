@@ -111,6 +111,8 @@ Collect all data first. No mutations in this phase. Use `Bash` with these comman
 - List the actual `*.md` files (excluding `MEMORY.md` itself) in the same directory.
 - Compute: orphaned files (on disk, not in index) and missing files (in index, not on disk).
 
+**CLAUDE.md walkthrough due (weekly, Joe 10-22):** read the header line of `~/.claude/CLAUDE.md` and extract the newest `walked through with Joe YYYY-MM-DD` date. If it is absent or older than 7 days, write a Pending entry: "CLAUDE.md walkthrough due (last <date>): Joe runs `walk me through claude.md` in an interactive session; the walkthrough shows each section's rules with their dates for keep / change / drop, edits the file in place, logs each Joe quote to memory/claude_md_full_20261020.md, and bumps the header date." Never perform the walkthrough headless; it needs Joe's verdicts.
+
 **Recall index health:**
 - `~/.local/bin/recall where` — confirm data root
 - Count files: `find $(recall where) -name '*.md' -type f 2>/dev/null | wc -l` and total memories indexed: `recall list --limit 1000 2>/dev/null | wc -l` — large divergence means the index is out of sync.
